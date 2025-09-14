@@ -1,0 +1,8 @@
+_backup
+_trash
+_venv
+deploy/secret-cdsl.yaml
+completed_tickets.txt
+last_check.txt
+notified_tickets.txt
+renotify_tickets.txt

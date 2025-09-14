@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redmine-ticket-notifier
+  namespace: redmine
+  labels:
+    app: redmine-ticket-notifier
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redmine-ticket-notifier
+  template:
+    metadata:
+      labels:
+        app: redmine-ticket-notifier
+    spec:
+      containers:
+        - name: app
+          image: c0a22100/redmine-ticket-notifier:v2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDMINE_URL
+              value: "http://monitoring-master-ml:32300"
+            - name: REDMINE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: redmine-api-secret
+                  key: apiKey
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: slack-webhook-secret
+                  key: url
+            - name: POLLING_INTERVAL
+              value: "600" # 10 seconds
+            - name: RENOTIFY_INTERVAL_SECONDS
+              value: "21600" # 6 hours
+            - name: NOTIFY_TRACKER_IDS
+              value: "28,31,33"
+            - name: LAST_CHECK_FILE
+              value: "/data/last_check.txt"
+            - name: NOTIFIED_TICKETS_FILE
+              value: "/data/notified_tickets.txt"
+            - name: RENOTIFY_TICKETS_FILE
+              value: "/data/renotify_tickets.txt"
+            - name: COMPLETED_TICKETS_FILE
+              value: "/data/completed_tickets.txt"
+            - name: USER_MAPPING_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: user-mapping-secret
+                  key: mapping
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redmine-ticket-notifier-data
