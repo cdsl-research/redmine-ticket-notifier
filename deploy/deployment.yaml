@@ -16,9 +16,9 @@ spec:
         app: redmine-ticket-notifier
     spec:
       containers:
-        - name: app
-          image: c0a22100/redmine-ticket-notifier:v2
-          imagePullPolicy: IfNotPresent
+        - name: redmine-ticket-notifier
+          image: c0a22100/redmine-ticket-notifier:v2.0
+          imagePullPolicy: Always
           env:
             - name: REDMINE_URL
               value: "http://monitoring-master-ml:32300"
@@ -27,30 +27,46 @@ spec:
                 secretKeyRef:
                   name: redmine-api-secret
                   key: apiKey
-            - name: SLACK_WEBHOOK_URL
+            - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: slack-webhook-secret
-                  key: url
+                  name: slack-app-secret
+                  key: botToken
+            - name: SLACK_CHANNEL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: slack-app-secret
+                  key: channelId
             - name: POLLING_INTERVAL
-              value: "600" # 10 seconds
-            - name: RENOTIFY_INTERVAL_SECONDS
+              value: "30" # 30 seconds
+            - name: PENDING_NOTIFICATION_INTERVAL_SECONDS
               value: "21600" # 6 hours
             - name: NOTIFY_TRACKER_IDS
-              value: "28,31,33"
+              # value: "42" # トラッカー(c0a22100-test)
+              value: "28,31,33" # トラッカー(1次調査, 2次調査, 3次調査)
             - name: LAST_CHECK_FILE
               value: "/data/last_check.txt"
             - name: NOTIFIED_TICKETS_FILE
               value: "/data/notified_tickets.txt"
-            - name: RENOTIFY_TICKETS_FILE
-              value: "/data/renotify_tickets.txt"
             - name: COMPLETED_TICKETS_FILE
               value: "/data/completed_tickets.txt"
+            - name: MESSAGE_MAPPING_FILE
+              value: "/data/message_mapping.txt"
+            - name: TRACKER_MAPPING_FILE
+              value: "/data/tracker_mapping.txt"
+            - name: CREATION_TIME_MAPPING_FILE
+              value: "/data/creation_time_mapping.txt"
+            - name: PENDING_MESSAGE_MAPPING_FILE
+              value: "/data/pending_message_mapping.txt"
             - name: USER_MAPPING_JSON
               valueFrom:
                 secretKeyRef:
                   name: user-mapping-secret
                   key: mapping
+            - name: SLACK_COMPLETION_EMOJI
+              value: "white_check_mark"  # 完了時のリアクション絵文字
+            - name: SLACK_DELETION_EMOJI
+              value: "wastebasket"  # 削除時のリアクション絵文字
           volumeMounts:
             - name: data
               mountPath: /data
