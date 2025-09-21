@@ -5,11 +5,15 @@ import signal
 import sys
 import os
 from datetime import datetime, timedelta, timezone
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 # --- 設定（環境変数で上書き可能） ---
 REDMINE_URL = os.getenv("REDMINE_URL", "<redmine-url>")
 REDMINE_API_KEY = os.getenv("REDMINE_API_KEY", "<redmine-api-key>")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "<slack-webhook-url>")
+# Slack App設定
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "<slack-bot-token>")
+SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID", "<slack-channel-id>")
 # 前回チェック時刻を保存するファイル
 LAST_CHECK_FILE = os.getenv("LAST_CHECK_FILE", "last_check.txt")
 # 通知済みチケットIDを保存するファイル
@@ -17,7 +21,7 @@ NOTIFIED_TICKETS_FILE = os.getenv("NOTIFIED_TICKETS_FILE", "notified_tickets.txt
 # ポーリング間隔（秒）
 POLLING_INTERVAL = int(os.getenv("POLLING_INTERVAL", "<polling-interval>"))
 # 通知するトラッカーID（カンマ区切り、空なら全て通知）
-_notify_ids_raw = os.getenv("NOTIFY_TRACKER_IDS", "<notify-tracker-id").strip()
+_notify_ids_raw = os.getenv("NOTIFY_TRACKER_IDS", "<notify-tracker-id>").strip()
 if _notify_ids_raw == "":
     NOTIFY_TRACKER_IDS = []
 else:
@@ -27,20 +31,33 @@ else:
         # 不正な環境変数は無視して全トラッカー通知にフォールバック
         NOTIFY_TRACKER_IDS = []
 
-# 再通知間隔（秒）（6時間＝21600秒）
-RENOTIFY_INTERVAL_SECONDS = int(os.getenv("RENOTIFY_INTERVAL_SECONDS", "<renotify-interval-seconds>"))
-# 再通知対象チケットを保存するファイル
-RENOTIFY_TICKETS_FILE = os.getenv("RENOTIFY_TICKETS_FILE", "renotify_tickets.txt")
+# 未着手通知間隔（秒）（デフォルト：1時間＝3600秒）
+PENDING_NOTIFICATION_INTERVAL_SECONDS = int(os.getenv("PENDING_NOTIFICATION_INTERVAL_SECONDS", "<pending-notification-interval-seconds>"))
 # 完了したチケットを保存するファイルファイル
 COMPLETED_TICKETS_FILE = os.getenv("COMPLETED_TICKETS_FILE", "completed_tickets.txt")
+# チケットIDとSlackメッセージIDのマッピングを保存するファイル
+MESSAGE_MAPPING_FILE = os.getenv("MESSAGE_MAPPING_FILE", "message_mapping.txt")
+# チケットIDとトラッカーIDのマッピングを保存するファイル
+TRACKER_MAPPING_FILE = os.getenv("TRACKER_MAPPING_FILE", "tracker_mapping.txt")
+# チケットIDと作成時刻のマッピングを保存するファイル
+CREATION_TIME_MAPPING_FILE = os.getenv("CREATION_TIME_MAPPING_FILE", "creation_time_mapping.txt")
+# チケットIDと再通知メッセージIDのマッピングを保存するファイル
+PENDING_MESSAGE_MAPPING_FILE = os.getenv("PENDING_MESSAGE_MAPPING_FILE", "pending_message_mapping.txt")
 # Redmine担当者とSlackユーザネームのマッピング（JSON形式）
 USER_MAPPING_JSON = os.getenv("USER_MAPPING_JSON", '{"Redmine上の担当者名": "SlackのメンバーID"}')
+# 完了時のSlackリアクション絵文字
+SLACK_COMPLETION_EMOJI = os.getenv("SLACK_COMPLETION_EMOJI", "white_check_mark")
+# 削除時のSlackリアクション絵文字
+SLACK_DELETION_EMOJI = os.getenv("SLACK_DELETION_EMOJI", "wastebasket")
 
 # ユーザーマッピングを読み込む
 try:
     USER_MAPPING = json.loads(USER_MAPPING_JSON)
 except json.JSONDecodeError:
     print("ユーザーマッピングのJSON形式が不正です。")
+
+# Slack Web APIクライアントを初期化
+slack_client = WebClient(token=SLACK_BOT_TOKEN)
 
 # --- 関数 ---
 def get_new_issues(last_check_time):
@@ -61,8 +78,6 @@ def get_new_issues(last_check_time):
         dt = datetime.now(timezone.utc) - timedelta(hours=1)
         formatted_time = dt.strftime('%Y-%m-%d')
     
-    print(f"前回チェック時刻以降のチケットを検索: {last_check_time}")
-    
     params = {
         "sort": "created_on:desc",
         "created_on": f">={formatted_time}",
@@ -71,8 +86,6 @@ def get_new_issues(last_check_time):
 
     try:
         response = requests.get(api_url, headers=headers, params=params)
-        print(f"API URL: {response.url}")
-        print(f"Response Status: {response.status_code}")
         if response.status_code != 200:
             print(f"Response Text: {response.text}")
         response.raise_for_status() # HTTPエラーが発生した場合に例外を発生させる
@@ -91,15 +104,15 @@ def get_new_issues(last_check_time):
                 # 前回チェック時刻以降かチェック
                 if created_on > last_check_dt:
                     filtered_issues.append(issue)
-                    print(f"新しいチケット#{issue['id']} 発見: {created_on}")
+                    print(f"New ticket #{issue['id']} found: {created_on}")
             except Exception as e:
-                print(f"チケット#{issue['id']} の日時解析エラー: {e}")
+                print(f"Date parsing error for ticket #{issue['id']}: {e}")
                 continue
         
-        print(f"新しいチケット: {len(filtered_issues)}件")
+        print(f"New tickets: {len(filtered_issues)}")
         return filtered_issues
     except requests.exceptions.RequestException as e:
-        print(f"Redmine API呼び出しエラー: {e}")
+        print(f"Redmine API call error: {e}")
         return []
 
 def load_notified_tickets():
@@ -126,49 +139,6 @@ def save_notified_ticket(ticket_id):
         for ticket_id in sorted(notified_tickets):
             f.write(f"{ticket_id}\n")
 
-def load_renotify_tickets():
-    """
-    再通知対象チケットIDとその通知時刻の辞書を読み込む
-    """
-    try:
-        with open(RENOTIFY_TICKETS_FILE, "r") as f:
-            content = f.read().strip()
-            if content:
-                renotify_tickets = {}
-                for line in content.split('\n'):
-                    if line.strip():
-                        parts = line.strip().split(',')
-                        if len(parts) == 2:
-                            ticket_id = int(parts[0])
-                            notify_time = parts[1]
-                            renotify_tickets[ticket_id] = notify_time
-                return renotify_tickets
-            return {}
-    except FileNotFoundError:
-        return {}
-
-def save_renotify_ticket(ticket_id, notify_time):
-    """
-    再通知対象チケットIDとその通知時刻をファイルに追加する
-    """
-    renotify_tickets = load_renotify_tickets()
-    renotify_tickets[ticket_id] = notify_time
-    
-    with open(RENOTIFY_TICKETS_FILE, "w") as f:
-        for ticket_id, notify_time in renotify_tickets.items():
-            f.write(f"{ticket_id},{notify_time}\n")
-
-def remove_renotify_ticket(ticket_id):
-    """
-    再通知対象チケットIDをファイルから削除する
-    """
-    renotify_tickets = load_renotify_tickets()
-    if ticket_id in renotify_tickets:
-        del renotify_tickets[ticket_id]
-        
-        with open(RENOTIFY_TICKETS_FILE, "w") as f:
-            for ticket_id, notify_time in renotify_tickets.items():
-                f.write(f"{ticket_id},{notify_time}\n")
 
 def load_completed_tickets():
     """
@@ -194,6 +164,183 @@ def save_completed_ticket(ticket_id):
         for ticket_id in sorted(completed_tickets):
             f.write(f"{ticket_id}\n")
 
+def load_message_mapping():
+    """
+    チケットIDとSlackメッセージIDのマッピングを読み込む
+    """
+    try:
+        with open(MESSAGE_MAPPING_FILE, "r") as f:
+            content = f.read().strip()
+            if content:
+                message_mapping = {}
+                for line in content.split('\n'):
+                    if line.strip():
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            ticket_id = int(parts[0])
+                            message_id = parts[1]
+                            message_mapping[ticket_id] = message_id
+                return message_mapping
+            return {}
+    except FileNotFoundError:
+        return {}
+
+def save_message_mapping(ticket_id, message_id):
+    """
+    チケットIDとSlackメッセージIDのマッピングを保存する
+    """
+    message_mapping = load_message_mapping()
+    message_mapping[ticket_id] = message_id
+    
+    with open(MESSAGE_MAPPING_FILE, "w") as f:
+        for ticket_id, message_id in message_mapping.items():
+            f.write(f"{ticket_id},{message_id}\n")
+
+def remove_message_mapping(ticket_id):
+    """
+    チケットIDのメッセージマッピングを削除する
+    """
+    message_mapping = load_message_mapping()
+    if ticket_id in message_mapping:
+        del message_mapping[ticket_id]
+        
+        with open(MESSAGE_MAPPING_FILE, "w") as f:
+            for ticket_id, message_id in message_mapping.items():
+                f.write(f"{ticket_id},{message_id}\n")
+
+
+def load_tracker_mapping():
+    """
+    チケットIDとトラッカーIDのマッピングを読み込む
+    """
+    try:
+        with open(TRACKER_MAPPING_FILE, "r") as f:
+            content = f.read().strip()
+            if content:
+                tracker_mapping = {}
+                for line in content.split('\n'):
+                    if line.strip():
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            ticket_id = int(parts[0])
+                            tracker_id = int(parts[1])
+                            tracker_mapping[ticket_id] = tracker_id
+                return tracker_mapping
+            return {}
+    except FileNotFoundError:
+        return {}
+
+def save_tracker_mapping(ticket_id, tracker_id):
+    """
+    チケットIDとトラッカーIDのマッピングを保存する
+    """
+    tracker_mapping = load_tracker_mapping()
+    tracker_mapping[ticket_id] = tracker_id
+    
+    with open(TRACKER_MAPPING_FILE, "w") as f:
+        for ticket_id, tracker_id in tracker_mapping.items():
+            f.write(f"{ticket_id},{tracker_id}\n")
+
+def remove_tracker_mapping(ticket_id):
+    """
+    チケットIDのトラッカーマッピングを削除する
+    """
+    tracker_mapping = load_tracker_mapping()
+    if ticket_id in tracker_mapping:
+        del tracker_mapping[ticket_id]
+        
+        with open(TRACKER_MAPPING_FILE, "w") as f:
+            for ticket_id, tracker_id in tracker_mapping.items():
+                f.write(f"{ticket_id},{tracker_id}\n")
+
+def load_creation_time_mapping():
+    """
+    チケットIDと作成時刻のマッピングを読み込む
+    """
+    try:
+        with open(CREATION_TIME_MAPPING_FILE, "r") as f:
+            content = f.read().strip()
+            if content:
+                creation_time_mapping = {}
+                for line in content.split('\n'):
+                    if line.strip():
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            ticket_id = int(parts[0])
+                            creation_time = parts[1]
+                            creation_time_mapping[ticket_id] = creation_time
+                return creation_time_mapping
+            return {}
+    except FileNotFoundError:
+        return {}
+
+def save_creation_time_mapping(ticket_id, creation_time):
+    """
+    チケットIDと作成時刻のマッピングを保存する
+    """
+    creation_time_mapping = load_creation_time_mapping()
+    creation_time_mapping[ticket_id] = creation_time
+    
+    with open(CREATION_TIME_MAPPING_FILE, "w") as f:
+        for ticket_id, creation_time in creation_time_mapping.items():
+            f.write(f"{ticket_id},{creation_time}\n")
+
+def remove_creation_time_mapping(ticket_id):
+    """
+    チケットIDの作成時刻マッピングを削除する
+    """
+    creation_time_mapping = load_creation_time_mapping()
+    if ticket_id in creation_time_mapping:
+        del creation_time_mapping[ticket_id]
+        
+        with open(CREATION_TIME_MAPPING_FILE, "w") as f:
+            for ticket_id, creation_time in creation_time_mapping.items():
+                f.write(f"{ticket_id},{creation_time}\n")
+
+def load_pending_message_mapping():
+    """
+    チケットIDと再通知メッセージIDのマッピングを読み込む
+    """
+    try:
+        with open(PENDING_MESSAGE_MAPPING_FILE, "r") as f:
+            content = f.read().strip()
+            if content:
+                pending_message_mapping = {}
+                for line in content.split('\n'):
+                    if line.strip():
+                        parts = line.strip().split(',')
+                        if len(parts) == 2:
+                            ticket_id = int(parts[0])
+                            message_id = parts[1]
+                            pending_message_mapping[ticket_id] = message_id
+                return pending_message_mapping
+            return {}
+    except FileNotFoundError:
+        return {}
+
+def save_pending_message_mapping(ticket_id, message_id):
+    """
+    チケットIDと再通知メッセージIDのマッピングを保存する
+    """
+    pending_message_mapping = load_pending_message_mapping()
+    pending_message_mapping[ticket_id] = message_id
+    
+    with open(PENDING_MESSAGE_MAPPING_FILE, "w") as f:
+        for ticket_id, message_id in pending_message_mapping.items():
+            f.write(f"{ticket_id},{message_id}\n")
+
+def remove_pending_message_mapping(ticket_id):
+    """
+    チケットIDの再通知メッセージマッピングを削除する
+    """
+    pending_message_mapping = load_pending_message_mapping()
+    if ticket_id in pending_message_mapping:
+        del pending_message_mapping[ticket_id]
+        
+        with open(PENDING_MESSAGE_MAPPING_FILE, "w") as f:
+            for ticket_id, message_id in pending_message_mapping.items():
+                f.write(f"{ticket_id},{message_id}\n")
+
 def remove_deleted_tickets_from_tracking(deleted_ticket_ids):
     """
     削除されたチケットを追跡対象から除外する
@@ -208,17 +355,25 @@ def remove_deleted_tickets_from_tracking(deleted_ticket_ids):
         for ticket_id in sorted(notified_tickets):
             f.write(f"{ticket_id}\n")
     
-    # 再通知対象からも削除
-    renotify_tickets = load_renotify_tickets()
+    # メッセージマッピングからも削除
     for ticket_id in deleted_ticket_ids:
-        if ticket_id in renotify_tickets:
-            del renotify_tickets[ticket_id]
+        remove_message_mapping(ticket_id)
     
-    with open(RENOTIFY_TICKETS_FILE, "w") as f:
-        for ticket_id, notify_time in renotify_tickets.items():
-            f.write(f"{ticket_id},{notify_time}\n")
     
-    print(f"削除されたチケット {len(deleted_ticket_ids)}件を追跡対象から除外しました")
+    # トラッカーマッピングからも削除
+    for ticket_id in deleted_ticket_ids:
+        remove_tracker_mapping(ticket_id)
+    
+    # 作成時刻マッピングからも削除
+    for ticket_id in deleted_ticket_ids:
+        remove_creation_time_mapping(ticket_id)
+    
+    # 再通知メッセージマッピングからも削除
+    for ticket_id in deleted_ticket_ids:
+        remove_pending_message_mapping(ticket_id)
+    
+    if deleted_ticket_ids:
+        print(f"  CLEANUP: Removed {len(deleted_ticket_ids)} deleted tickets from tracking")
 
 def get_slack_username(redmine_user_name):
     """
@@ -275,7 +430,7 @@ def get_ticket_status(ticket_id):
         issue = data.get("issue", {})
         return issue.get("status", {}).get("name", "不明")
     except requests.exceptions.RequestException as e:
-        print(f"チケット#{ticket_id}のステータス取得エラー: {e}")
+        print(f"Error getting status for ticket #{ticket_id}: {e}")
         return "不明"
 
 def get_ticket_info(ticket_id):
@@ -295,15 +450,17 @@ def get_ticket_info(ticket_id):
         data = response.json()
         return data.get("issue", {})
     except requests.exceptions.RequestException as e:
-        print(f"チケット#{ticket_id}の情報取得エラー: {e}")
+        print(f"Error getting info for ticket #{ticket_id}: {e}")
         return None
 
 def check_completed_tickets():
     """
-    通知済みチケットの完了をチェックし、完了した場合は通知する
+    通知済みチケットの完了をチェックし、完了した場合はリアクションを追加する
+    また、特定の条件でメッセージを削除する
     """
     notified_tickets = load_notified_tickets()
     completed_tickets = load_completed_tickets()
+    tracker_mapping = load_tracker_mapping()
     newly_completed = []
     deleted_tickets = []
     
@@ -312,17 +469,56 @@ def check_completed_tickets():
             # チケットの詳細情報を取得
             issue = get_ticket_info(ticket_id)
             if issue is None:
-                # チケットが削除された場合
+                # チケットが削除された場合 - 両方のメッセージにゴミ箱リアクションを追加
                 deleted_tickets.append(ticket_id)
-                print(f"チケット#{ticket_id}は削除されました - 追跡対象から除外します")
+                original_reaction = add_deletion_reaction(ticket_id)
+                pending_reaction = add_pending_deletion_reaction(ticket_id)
+                
+                if original_reaction and pending_reaction:
+                    print(f"  TICKET DELETED: #{ticket_id} (Both messages marked with wastebasket reaction)")
+                elif original_reaction:
+                    print(f"  TICKET DELETED: #{ticket_id} (Original message marked with wastebasket reaction)")
+                elif pending_reaction:
+                    print(f"  TICKET DELETED: #{ticket_id} (Pending message marked with wastebasket reaction)")
+                else:
+                    print(f"  TICKET DELETED: #{ticket_id} (No messages found)")
                 continue
             elif issue:
                 status = issue.get("status", {}).get("name", "不明")
+                current_tracker_id = issue.get("tracker", {}).get("id")
+                original_tracker_id = tracker_mapping.get(ticket_id)
+                
                 # 完了ステータスかチェック（「完了」「終了」「クローズ」など）
                 if status in ["完了", "終了", "クローズ", "Closed", "Resolved", "Done"]:
                     newly_completed.append(issue)
                     save_completed_ticket(ticket_id)
-                    print(f"チケット#{ticket_id}が完了しました (ステータス: {status})")
+                    
+                    # トラッカーが変更されている場合は両方のメッセージにゴミ箱リアクションを追加
+                    if original_tracker_id and current_tracker_id != original_tracker_id:
+                        original_reaction = add_deletion_reaction(ticket_id)
+                        pending_reaction = add_pending_deletion_reaction(ticket_id)
+                        
+                        if original_reaction and pending_reaction:
+                            print(f"  COMPLETED (tracker changed): #{ticket_id} - {issue.get('subject', 'No subject')} (Both messages marked with wastebasket reaction)")
+                        elif original_reaction:
+                            print(f"  COMPLETED (tracker changed): #{ticket_id} - {issue.get('subject', 'No subject')} (Original message marked with wastebasket reaction)")
+                        elif pending_reaction:
+                            print(f"  COMPLETED (tracker changed): #{ticket_id} - {issue.get('subject', 'No subject')} (Pending message marked with wastebasket reaction)")
+                        else:
+                            print(f"  COMPLETED (tracker changed): #{ticket_id} - {issue.get('subject', 'No subject')} (No messages found)")
+                    else:
+                        # 元のメッセージにリアクションを追加
+                        add_completion_reaction(ticket_id)
+                        # 再通知メッセージにもリアクションを追加
+                        add_pending_completion_reaction(ticket_id)
+                        print(f"  COMPLETED: #{ticket_id} - {issue.get('subject', 'No subject')}")
+                    
+                    # トラッカーマッピングを削除
+                    remove_tracker_mapping(ticket_id)
+                    # 作成時刻マッピングを削除
+                    remove_creation_time_mapping(ticket_id)
+                    # 再通知メッセージマッピングを削除
+                    remove_pending_message_mapping(ticket_id)
     
     # 削除されたチケットを追跡対象から除外
     if deleted_tickets:
@@ -330,93 +526,22 @@ def check_completed_tickets():
     
     return newly_completed
 
-def filter_quick_completion_tickets(new_issues, completed_issues):
-    """
-    10分以内に発行と完了が済んだチケットを除外する
-    """
-    # 新規チケットのIDセット
-    new_ticket_ids = {issue['id'] for issue in new_issues}
-    
-    # 完了チケットのIDセット
-    completed_ticket_ids = {issue['id'] for issue in completed_issues}
-    
-    # 10分以内に発行と完了が済んだチケットのID
-    quick_completion_ids = new_ticket_ids.intersection(completed_ticket_ids)
-    
-    # 新規チケットから除外
-    filtered_new_issues = [issue for issue in new_issues if issue['id'] not in quick_completion_ids]
-    
-    # 完了チケットから除外
-    filtered_completed_issues = [issue for issue in completed_issues if issue['id'] not in quick_completion_ids]
-    
-    if quick_completion_ids:
-        print(f"10分以内に発行と完了が済んだチケット {len(quick_completion_ids)}件を除外しました: {list(quick_completion_ids)}")
-    
-    return filtered_new_issues, filtered_completed_issues
 
-def check_renotify_tickets():
-    """
-    再通知対象チケットのステータスをチェックし、未着手の場合は再通知する
-    """
-    renotify_tickets = load_renotify_tickets()
-    current_time = datetime.now(timezone.utc)
-    tickets_to_remove = []
-    
-    for ticket_id, notify_time_str in renotify_tickets.items():
-        try:
-            # 通知時刻を解析
-            notify_time = datetime.fromisoformat(notify_time_str.replace('Z', '+00:00'))
-            
-            # 再通知間隔が経過しているかチェック
-            if current_time >= notify_time + timedelta(seconds=RENOTIFY_INTERVAL_SECONDS):
-                # チケットのステータスを取得
-                status = get_ticket_status(ticket_id)
-                
-                if status == "削除済み":
-                    # チケットが削除された場合は追跡対象から除外
-                    print(f"チケット#{ticket_id}は削除されました - 再通知対象から除外")
-                    tickets_to_remove.append(ticket_id)
-                elif status == "未着手":
-                    # 再通知を実行
-                    print(f"再通知: チケット#{ticket_id} (ステータス: {status})")
-                    
-                    # 再通知用のメッセージを送信
-                    send_renotify_slack_notification(ticket_id, status)
-                    
-                    # 再通知済みとして削除
-                    tickets_to_remove.append(ticket_id)
-                else:
-                    # ステータスが変更されている場合は削除
-                    print(f"チケット#{ticket_id}のステータスが変更されました: {status} - 再通知対象から除外")
-                    tickets_to_remove.append(ticket_id)
-                    
-        except Exception as e:
-            print(f"チケット#{ticket_id}の再通知チェックエラー: {e}")
-            continue
-    
-    # 処理済みのチケットを削除
-    for ticket_id in tickets_to_remove:
-        remove_renotify_ticket(ticket_id)
-    
-    return len(tickets_to_remove)
 
 def display_ticket_info(issue):
     """
     チケット情報をコンソールに表示する
     """
-    print("=" * 60)
-    print(f"新しいチケット")
-    print("=" * 60)
-    print(f"チケットID: #{issue['id']}")
-    print(f"プロジェクト: {issue['project']['name']}")
-    print(f"トラッカー: {issue.get('tracker', {}).get('name', '不明')}")
-    print(f"件名: {issue['subject']}")
-    print(f"作成者: {issue.get('author', {}).get('name', '不明')}")
-    print(f"作成日時: {issue['created_on']}")
-    print(f"ステータス: {issue.get('status', {}).get('name', '不明')}")
-    print(f"優先度: {issue.get('priority', {}).get('name', '不明')}")
-    print(f"URL: {REDMINE_URL}/issues/{issue['id']}")
-    print("=" * 60)
+    project = issue.get('project', {}).get('name', 'Unknown')
+    tracker = issue.get('tracker', {}).get('name', 'Unknown')
+    subject = issue.get('subject', 'No subject')
+    author = issue.get('author', {}).get('name', 'Unknown')
+    created_on = issue.get('created_on', 'Unknown')
+    status = issue.get('status', {}).get('name', 'Unknown')
+    priority = issue.get('priority', {}).get('name', 'Unknown')
+    url = f"{REDMINE_URL}/issues/{issue['id']}"
+    
+    print(f"  NEW: #{issue['id']} - {subject} | Project: {project} | Tracker: {tracker} | Author: {author} | Status: {status} | Priority: {priority} | Created: {created_on} | URL: {url}")
 
 def send_slack_notification(issue):
     """
@@ -429,14 +554,14 @@ def send_slack_notification(issue):
     # 本文を作成
     text = f"新しいチケットが作成されました。"
     if mention_text:
-        text += f"{mention_text}"
+        text += f" {mention_text}"
     
     # Slackに送信するメッセージを構築
     message = {
         "text": text,
         "attachments": [
             {
-                "color": "#A31E24",
+                "color": "#ae1500",
                 "title": f"{issue['tracker']['name']} #{issue['id']}: {issue['subject']}",
                 "title_link": f"{REDMINE_URL}/issues/{issue['id']}",
                 "footer": f"{issue.get('description', '')}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
@@ -446,32 +571,37 @@ def send_slack_notification(issue):
     }
     
     try:
-        response = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(message), headers={'Content-Type': 'application/json'})
-        response.raise_for_status()
-        print(f"チケット#{issue['id']}のSlack通知を送信しました。")
-    except requests.exceptions.RequestException as e:
-        print(f"Slack通知送信エラー: {e}")
+        response = slack_client.chat_postMessage(
+            channel=SLACK_CHANNEL_ID,
+            text=text,
+            attachments=message["attachments"]
+        )
+        # メッセージIDを保存
+        message_id = response['ts']
+        save_message_mapping(issue['id'], message_id)
+        pass  # 通知送信は成功
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to send notification for #{issue['id']}: {e.response['error']}")
 
-def send_renotify_slack_notification(ticket_id, status):
+def send_pending_notification_with_mention(issue):
     """
-    再通知用のSlackメッセージを送信する
+    未着手チケットの通知をSlackに送信する（@メンション付き）
     """
-    # チケットの詳細情報を取得して担当者を特定
-    issue = get_ticket_info(ticket_id)
-    assigned_to_name = issue.get('assigned_to', {}).get('name', '未割り当て') if issue else '未割り当て'
+    # 担当者の@メンションを作成
+    assigned_to_name = issue.get('assigned_to', {}).get('name', '未割り当て')
     mention_text = create_mention_text(assigned_to_name)
     
     # 本文を作成
-    text = f"下記のチケットが未着手です。"
+    text = f"未着手のチケットがあります。"
     if mention_text:
-        text += f"{mention_text}"
+        text += f" {mention_text}"
     
-    # 再通知用のメッセージを構築
+    # Slackに送信するメッセージを構築
     message = {
         "text": text,
         "attachments": [
             {
-                "color": "#FFCC01",
+                "color": "#FFCC01",  # 黄色
                 "title": f"{issue['tracker']['name']} #{issue['id']}: {issue['subject']}",
                 "title_link": f"{REDMINE_URL}/issues/{issue['id']}",
                 "footer": f"{issue.get('description', '')}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
@@ -481,48 +611,168 @@ def send_renotify_slack_notification(ticket_id, status):
     }
     
     try:
-        response = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(message), headers={'Content-Type': 'application/json'})
-        response.raise_for_status()
-        print(f"チケット#{ticket_id}の再通知Slackメッセージを送信しました。")
-    except requests.exceptions.RequestException as e:
-        print(f"再通知Slack送信エラー: {e}")
+        response = slack_client.chat_postMessage(
+            channel=SLACK_CHANNEL_ID,
+            text=text,
+            attachments=message["attachments"]
+        )
+        # 再通知メッセージIDを保存
+        message_id = response['ts']
+        save_pending_message_mapping(issue['id'], message_id)
+        return True
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to send pending notification for #{issue['id']}: {e.response['error']}")
+        return False
 
-def send_completion_slack_notification(issue):
+
+def add_completion_reaction(ticket_id):
     """
-    完了通知用のSlackメッセージを送信する
+    完了したチケットの元のメッセージにリアクションを追加する
     """
-    # 担当者名を取得（@メンションは不要）
-    assigned_to_name = issue.get('assigned_to', {}).get('name', '不明')
+    message_mapping = load_message_mapping()
+    message_id = message_mapping.get(ticket_id)
     
-    # 本文を作成（@メンションなし）
-    text = f"下記のチケットのステータスが完了になりました。"
-    
-    # 完了通知用のメッセージを構築
-    message = {
-        "text": text,
-        "attachments": [
-            {
-                "color": "#28A745",  # 完了通知用の色（緑）
-                "title": f"{issue['tracker']['name']} #{issue['id']}: {issue['subject']}",
-                "title_link": f"{REDMINE_URL}/issues/{issue['id']}",
-                "footer": f"{issue.get('description', '')}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
-                "ts": int(datetime.fromisoformat(issue['created_on'].replace('Z', '+00:00')).timestamp())
-            }
-        ]
-    }
+    if not message_id:
+        return
     
     try:
-        response = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(message), headers={'Content-Type': 'application/json'})
-        response.raise_for_status()
-        print(f"チケット#{issue['id']}の完了通知Slackメッセージを送信しました。")
-    except requests.exceptions.RequestException as e:
-        print(f"完了通知Slack送信エラー: {e}")
+        response = slack_client.reactions_add(
+            channel=SLACK_CHANNEL_ID,
+            timestamp=message_id,
+            name=SLACK_COMPLETION_EMOJI  # 完了時のリアクション絵文字
+        )
+        pass  # リアクション追加は成功
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to add reaction for #{ticket_id}: {e.response['error']}")
+
+def add_pending_completion_reaction(ticket_id):
+    """
+    完了したチケットの再通知メッセージに完了リアクションを追加する
+    """
+    pending_message_mapping = load_pending_message_mapping()
+    message_id = pending_message_mapping.get(ticket_id)
+    
+    if not message_id:
+        return False
+    
+    try:
+        response = slack_client.reactions_add(
+            channel=SLACK_CHANNEL_ID,
+            timestamp=message_id,
+            name=SLACK_COMPLETION_EMOJI  # 完了時のリアクション絵文字
+        )
+        return True
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to add pending completion reaction for #{ticket_id}: {e.response['error']}")
+        return False
+
+def add_deletion_reaction(ticket_id):
+    """
+    削除されたチケットの元のメッセージにゴミ箱リアクションを追加する
+    """
+    message_mapping = load_message_mapping()
+    message_id = message_mapping.get(ticket_id)
+    
+    if not message_id:
+        return False
+    
+    try:
+        response = slack_client.reactions_add(
+            channel=SLACK_CHANNEL_ID,
+            timestamp=message_id,
+            name=SLACK_DELETION_EMOJI  # 削除時のリアクション絵文字
+        )
+        return True
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to add deletion reaction for #{ticket_id}: {e.response['error']}")
+        return False
+
+def add_pending_deletion_reaction(ticket_id):
+    """
+    削除されたチケットの再通知メッセージにゴミ箱リアクションを追加する
+    """
+    pending_message_mapping = load_pending_message_mapping()
+    message_id = pending_message_mapping.get(ticket_id)
+    
+    if not message_id:
+        return False
+    
+    try:
+        response = slack_client.reactions_add(
+            channel=SLACK_CHANNEL_ID,
+            timestamp=message_id,
+            name=SLACK_DELETION_EMOJI  # 削除時のリアクション絵文字
+        )
+        return True
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to add pending deletion reaction for #{ticket_id}: {e.response['error']}")
+        return False
+
+def delete_slack_message(ticket_id):
+    """
+    チケットのSlackメッセージを削除する
+    """
+    message_mapping = load_message_mapping()
+    message_id = message_mapping.get(ticket_id)
+    
+    if not message_id:
+        return False
+    
+    try:
+        response = slack_client.chat_delete(
+            channel=SLACK_CHANNEL_ID,
+            ts=message_id
+        )
+        # メッセージマッピングからも削除
+        remove_message_mapping(ticket_id)
+        return True
+    except SlackApiError as e:
+        print(f"  ERROR: Failed to delete message for #{ticket_id}: {e.response['error']}")
+        return False
+
+def check_pending_tickets():
+    """
+    通知済みチケットの未着手状況をチェックし、指定時間経過後に未着手の場合は通知する
+    """
+    notified_tickets = load_notified_tickets()
+    completed_tickets = load_completed_tickets()
+    creation_time_mapping = load_creation_time_mapping()
+    current_time = datetime.now(timezone.utc)
+    
+    for ticket_id in notified_tickets:
+        if ticket_id not in completed_tickets:
+            # チケットの詳細情報を取得
+            issue = get_ticket_info(ticket_id)
+            if issue is None:
+                # チケットが削除された場合
+                continue
+            elif issue:
+                status = issue.get("status", {}).get("name", "不明")
+                # 未着手ステータスかチェック（「未着手」のみ）
+                if status in ["未着手"]:
+                    # 作成時刻を取得
+                    creation_time_str = creation_time_mapping.get(ticket_id)
+                    if creation_time_str:
+                        try:
+                            creation_time = datetime.fromisoformat(creation_time_str.replace('Z', '+00:00'))
+                            # 指定時間経過しているかチェック
+                            time_elapsed = (current_time - creation_time).total_seconds()
+                            if time_elapsed >= PENDING_NOTIFICATION_INTERVAL_SECONDS:
+                                # 未着手通知を送信
+                                if send_pending_notification_with_mention(issue):
+                                    print(f"  PENDING NOTIFICATION: #{ticket_id} - {issue.get('subject', 'No subject')} (elapsed: {int(time_elapsed/60)} minutes)")
+                                    # 作成時刻マッピングから削除（一度通知したら再通知しない）
+                                    remove_creation_time_mapping(ticket_id)
+                        except Exception as e:
+                            print(f"  ERROR: Failed to parse creation time for #{ticket_id}: {e}")
+                            continue
+
 
 def signal_handler(sig, frame):
     """
     Ctrl+Cで終了する際のシグナルハンドラー
     """
-    print("\n監視を停止します...")
+    print("\nStopping monitoring...")
     sys.exit(0)
 
 def main():
@@ -532,35 +782,30 @@ def main():
     # シグナルハンドラーを設定
     signal.signal(signal.SIGINT, signal_handler)
     
-    print("Redmineチケット監視を開始します...")
-    print(f"ポーリング間隔: {POLLING_INTERVAL}秒")
-    print(f"再通知間隔: {RENOTIFY_INTERVAL_SECONDS}秒")
+    print("Starting Redmine ticket monitoring...")
+    print(f"Polling interval: {POLLING_INTERVAL}s, Pending notification interval: {PENDING_NOTIFICATION_INTERVAL_SECONDS}s")
     if NOTIFY_TRACKER_IDS:
-        print(f"通知対象トラッカーID: {NOTIFY_TRACKER_IDS}")
+        print(f"Target trackers: {NOTIFY_TRACKER_IDS}")
     else:
-        print("通知対象: 全てのトラッカー")
-    print("停止するには Ctrl+C を押してください")
+        print("Target: All trackers")
+    print("Press Ctrl+C to stop")
     print("-" * 60)
     
     try:
         with open(LAST_CHECK_FILE, "r") as f:
             last_check_time = f.read().strip()
-        print(f"前回チェック時刻: {last_check_time}")
+        print(f"Last check time: {last_check_time}")
     except FileNotFoundError:
         # ファイルがない場合は現在時刻を基準にする
         last_check_time = datetime.now(timezone.utc).isoformat()
-        print(f"初回実行: {last_check_time}")
-    
-    # 通知済みチケット数を表示
-    notified_tickets = load_notified_tickets()
-    print(f"通知済みチケット数: {len(notified_tickets)}件")
+        print(f"First run: {last_check_time}")
     
     check_count = 0
     
     while True:
         check_count += 1
-        current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        print(f"\nチェック #{check_count} - {current_time}")
+        current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        print(f"\n[{current_time}] Check #{check_count}")
         
         new_issues = get_new_issues(last_check_time)
         
@@ -571,64 +816,38 @@ def main():
             # 通知済みチェックを適用
             final_filtered_issues = [issue for issue in tracker_filtered_issues if not is_already_notified(issue)]
             
-            print(f"{len(new_issues)}件の新しいチケットが見つかりました。")
-            if NOTIFY_TRACKER_IDS:
-                print(f"通知対象トラッカー: {NOTIFY_TRACKER_IDS}")
-                print(f"トラッカーフィルタ後: {len(tracker_filtered_issues)}件")
-            
-            print(f"未通知チケット: {len(final_filtered_issues)}件")
-            
-            for issue in final_filtered_issues:
-                display_ticket_info(issue)
-                send_slack_notification(issue)
-                # 通知済みとして記録
-                save_notified_ticket(issue['id'])
-                # 再通知対象として登録（現在時刻を記録）
-                current_time = datetime.now(timezone.utc).isoformat()
-                save_renotify_ticket(issue['id'], current_time)
-                print(f"チケット#{issue['id']}を通知済みとして記録しました。")
-                print(f"チケット#{issue['id']}を再通知対象として登録しました。")
+            if final_filtered_issues:
+                print(f"Found {len(final_filtered_issues)} new tickets to notify")
                 
-            # フィルタリングで除外されたチケットがある場合は表示
-            tracker_excluded = len(new_issues) - len(tracker_filtered_issues)
-            notified_excluded = len(tracker_filtered_issues) - len(final_filtered_issues)
-            
-            if tracker_excluded > 0:
-                print(f"トラッカーフィルタにより {tracker_excluded}件のチケットを除外しました。")
-            if notified_excluded > 0:
-                print(f"既に通知済みのため {notified_excluded}件のチケットを除外しました。")
+                for issue in final_filtered_issues:
+                    print(f"  NEW: #{issue['id']} - {issue['subject']} ({issue.get('tracker', {}).get('name', 'Unknown')})")
+                    send_slack_notification(issue)
+                    # 通知済みとして記録
+                    save_notified_ticket(issue['id'])
+                    # トラッカーIDを保存
+                    tracker_id = issue.get('tracker', {}).get('id')
+                    if tracker_id:
+                        save_tracker_mapping(issue['id'], tracker_id)
+                    # 作成時刻を保存（未着手通知用）
+                    creation_time = issue.get('created_on', '')
+                    if creation_time:
+                        save_creation_time_mapping(issue['id'], creation_time)
+            else:
+                print("No new tickets to notify")
         else:
-            print("新しいチケットはありませんでした。")
+            print("No new tickets found")
         
         # 完了したチケットをチェック
-        print("\n完了したチケットをチェック中...")
         completed_issues = check_completed_tickets()
         
-        # 10分以内に発行と完了が済んだチケットを除外
-        if new_issues and completed_issues:
-            new_issues, completed_issues = filter_quick_completion_tickets(new_issues, completed_issues)
+        # 未着手チケットのチェック
+        check_pending_tickets()
         
-        # 完了したチケットを通知
-        if completed_issues:
-            print(f"{len(completed_issues)}件のチケットが完了しました。")
-            for issue in completed_issues:
-                send_completion_slack_notification(issue)
-        else:
-            print("完了したチケットはありませんでした。")
-        
-        # 再通知対象チケットをチェック
-        print("\n再通知対象チケットをチェック中...")
-        renotify_count = check_renotify_tickets()
-        if renotify_count > 0:
-            print(f"{renotify_count}件のチケットを再通知しました。")
-        else:
-            print("再通知対象のチケットはありませんでした。")
         
         # 現在の時刻をファイルに保存
         with open(LAST_CHECK_FILE, "w") as f:
             f.write(datetime.now(timezone.utc).isoformat())
         
-        print(f"{POLLING_INTERVAL}秒後に次のチェックを実行します...")
         time.sleep(POLLING_INTERVAL)
 
 if __name__ == "__main__":
