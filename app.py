@@ -392,6 +392,16 @@ def create_mention_text(redmine_user_name):
         return f"<@{slack_username}>"
     return None
 
+def truncate_description(description, max_length=250):
+    """
+    descriptionが指定の文字数以上の場合、切り詰めて...を追加する
+    """
+    if not description:
+        return description
+    if len(description) > max_length:
+        return description[:max_length] + "..."
+    return description
+
 def is_tracker_notification_target(issue):
     """
     指定されたトラッカーのチケットかどうかを判定する
@@ -445,13 +455,14 @@ def get_ticket_info(ticket_id):
     try:
         response = requests.get(api_url, headers=headers)
         if response.status_code == 404:
-            return None
+            return None  # チケットが削除された
         response.raise_for_status()
         data = response.json()
         return data.get("issue", {})
     except requests.exceptions.RequestException as e:
         print(f"Error getting info for ticket #{ticket_id}: {e}")
-        return None
+        # HTTPエラーの場合は例外を再発生させて、上位で処理させる
+        raise
 
 def check_completed_tickets():
     """
@@ -466,27 +477,28 @@ def check_completed_tickets():
     
     for ticket_id in notified_tickets:
         if ticket_id not in completed_tickets:
-            # チケットの詳細情報を取得
-            issue = get_ticket_info(ticket_id)
-            if issue is None:
-                # チケットが削除された場合 - 両方のメッセージにゴミ箱リアクションを追加
-                deleted_tickets.append(ticket_id)
-                original_reaction = add_deletion_reaction(ticket_id)
-                pending_reaction = add_pending_deletion_reaction(ticket_id)
-                
-                if original_reaction and pending_reaction:
-                    print(f"  TICKET DELETED: #{ticket_id} (Both messages marked with wastebasket reaction)")
-                elif original_reaction:
-                    print(f"  TICKET DELETED: #{ticket_id} (Original message marked with wastebasket reaction)")
-                elif pending_reaction:
-                    print(f"  TICKET DELETED: #{ticket_id} (Pending message marked with wastebasket reaction)")
-                else:
-                    print(f"  TICKET DELETED: #{ticket_id} (No messages found)")
-                continue
-            elif issue:
-                status = issue.get("status", {}).get("name", "不明")
-                current_tracker_id = issue.get("tracker", {}).get("id")
-                original_tracker_id = tracker_mapping.get(ticket_id)
+            try:
+                # チケットの詳細情報を取得
+                issue = get_ticket_info(ticket_id)
+                if issue is None:
+                    # チケットが削除された場合 - 両方のメッセージにゴミ箱リアクションを追加
+                    deleted_tickets.append(ticket_id)
+                    original_reaction = add_deletion_reaction(ticket_id)
+                    pending_reaction = add_pending_deletion_reaction(ticket_id)
+                    
+                    if original_reaction and pending_reaction:
+                        print(f"  TICKET DELETED: #{ticket_id} (Both messages marked with wastebasket reaction)")
+                    elif original_reaction:
+                        print(f"  TICKET DELETED: #{ticket_id} (Original message marked with wastebasket reaction)")
+                    elif pending_reaction:
+                        print(f"  TICKET DELETED: #{ticket_id} (Pending message marked with wastebasket reaction)")
+                    else:
+                        print(f"  TICKET DELETED: #{ticket_id} (No messages found)")
+                    continue
+                elif issue:
+                    status = issue.get("status", {}).get("name", "不明")
+                    current_tracker_id = issue.get("tracker", {}).get("id")
+                    original_tracker_id = tracker_mapping.get(ticket_id)
                 
                 # 完了ステータスかチェック（「完了」「終了」「クローズ」など）
                 if status in ["完了", "終了", "クローズ", "Closed", "Resolved", "Done"]:
@@ -519,6 +531,10 @@ def check_completed_tickets():
                     remove_creation_time_mapping(ticket_id)
                     # 再通知メッセージマッピングを削除
                     remove_pending_message_mapping(ticket_id)
+            except requests.exceptions.RequestException as e:
+                # HTTPエラーの場合はスキップして次回に再試行
+                print(f"  ERROR: Failed to check ticket #{ticket_id}: {e}")
+                continue
     
     # 削除されたチケットを追跡対象から除外
     if deleted_tickets:
@@ -556,6 +572,10 @@ def send_slack_notification(issue):
     if mention_text:
         text += f" {mention_text}"
     
+    # descriptionを切り詰める
+    description = issue.get('description', '')
+    truncated_description = truncate_description(description)
+    
     # Slackに送信するメッセージを構築
     message = {
         "text": text,
@@ -564,7 +584,7 @@ def send_slack_notification(issue):
                 "color": "#ae1500",
                 "title": f"{issue['tracker']['name']} #{issue['id']}: {issue['subject']}",
                 "title_link": f"{REDMINE_URL}/issues/{issue['id']}",
-                "footer": f"{issue.get('description', '')}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
+                "footer": f"{truncated_description}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
                 "ts": int(datetime.fromisoformat(issue['created_on'].replace('Z', '+00:00')).timestamp())
             }
         ]
@@ -596,6 +616,10 @@ def send_pending_notification_with_mention(issue):
     if mention_text:
         text += f" {mention_text}"
     
+    # descriptionを切り詰める
+    description = issue.get('description', '')
+    truncated_description = truncate_description(description)
+    
     # Slackに送信するメッセージを構築
     message = {
         "text": text,
@@ -604,7 +628,7 @@ def send_pending_notification_with_mention(issue):
                 "color": "#FFCC01",  # 黄色
                 "title": f"{issue['tracker']['name']} #{issue['id']}: {issue['subject']}",
                 "title_link": f"{REDMINE_URL}/issues/{issue['id']}",
-                "footer": f"{issue.get('description', '')}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
+                "footer": f"{truncated_description}\n担当者: {issue.get('assigned_to', {}).get('name', '未割り当て')}",
                 "ts": int(datetime.fromisoformat(issue['created_on'].replace('Z', '+00:00')).timestamp())
             }
         ]
@@ -741,31 +765,36 @@ def check_pending_tickets():
     
     for ticket_id in notified_tickets:
         if ticket_id not in completed_tickets:
-            # チケットの詳細情報を取得
-            issue = get_ticket_info(ticket_id)
-            if issue is None:
-                # チケットが削除された場合
+            try:
+                # チケットの詳細情報を取得
+                issue = get_ticket_info(ticket_id)
+                if issue is None:
+                    # チケットが削除された場合
+                    continue
+                elif issue:
+                    status = issue.get("status", {}).get("name", "不明")
+                    # 未着手ステータスかチェック（「未着手」のみ）
+                    if status in ["未着手"]:
+                        # 作成時刻を取得
+                        creation_time_str = creation_time_mapping.get(ticket_id)
+                        if creation_time_str:
+                            try:
+                                creation_time = datetime.fromisoformat(creation_time_str.replace('Z', '+00:00'))
+                                # 指定時間経過しているかチェック
+                                time_elapsed = (current_time - creation_time).total_seconds()
+                                if time_elapsed >= PENDING_NOTIFICATION_INTERVAL_SECONDS:
+                                    # 未着手通知を送信
+                                    if send_pending_notification_with_mention(issue):
+                                        print(f"  PENDING NOTIFICATION: #{ticket_id} - {issue.get('subject', 'No subject')} (elapsed: {int(time_elapsed/60)} minutes)")
+                                        # 作成時刻マッピングから削除（一度通知したら再通知しない）
+                                        remove_creation_time_mapping(ticket_id)
+                            except Exception as e:
+                                print(f"  ERROR: Failed to parse creation time for #{ticket_id}: {e}")
+                                continue
+            except requests.exceptions.RequestException as e:
+                # HTTPエラーの場合はスキップして次回に再試行
+                print(f"  ERROR: Failed to check pending ticket #{ticket_id}: {e}")
                 continue
-            elif issue:
-                status = issue.get("status", {}).get("name", "不明")
-                # 未着手ステータスかチェック（「未着手」のみ）
-                if status in ["未着手"]:
-                    # 作成時刻を取得
-                    creation_time_str = creation_time_mapping.get(ticket_id)
-                    if creation_time_str:
-                        try:
-                            creation_time = datetime.fromisoformat(creation_time_str.replace('Z', '+00:00'))
-                            # 指定時間経過しているかチェック
-                            time_elapsed = (current_time - creation_time).total_seconds()
-                            if time_elapsed >= PENDING_NOTIFICATION_INTERVAL_SECONDS:
-                                # 未着手通知を送信
-                                if send_pending_notification_with_mention(issue):
-                                    print(f"  PENDING NOTIFICATION: #{ticket_id} - {issue.get('subject', 'No subject')} (elapsed: {int(time_elapsed/60)} minutes)")
-                                    # 作成時刻マッピングから削除（一度通知したら再通知しない）
-                                    remove_creation_time_mapping(ticket_id)
-                        except Exception as e:
-                            print(f"  ERROR: Failed to parse creation time for #{ticket_id}: {e}")
-                            continue
 
 
 def signal_handler(sig, frame):
@@ -841,8 +870,7 @@ def main():
         completed_issues = check_completed_tickets()
         
         # 未着手チケットのチェック
-        check_pending_tickets()
-        
+        # check_pending_tickets()  # コメントアウトで未着手通知機能を無効化
         
         # 現在の時刻をファイルに保存
         with open(LAST_CHECK_FILE, "w") as f:
