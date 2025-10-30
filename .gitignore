@@ -6,3 +6,4 @@ completed_tickets.txt
 last_check.txt
 notified_tickets.txt
 renotify_tickets.txt
+docker-push.sh
