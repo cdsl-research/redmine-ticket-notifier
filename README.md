@@ -4,7 +4,7 @@
 Redmineに登録されたチケットをSlackのチャンネルに通知します。
 
 ## 前提
-K3sによるKubernetesクラスタにデプロイすることを前提としています．
+K3sによるKubernetesクラスタにデプロイすることを前提としています。
 
 またSlack Appを使用します。
 
@@ -17,8 +17,9 @@ K3sによるKubernetesクラスタにデプロイすることを前提として�
 ## 環境構成
 - Ubuntu Server 24.04.2 LTS
 - K3s v1.30.6+k3s1
+    - Master/Worker Node 
+      vCPU: 4 [Core], RAM: 8 [GB], SSD: 40 [GB], OS: Ubuntu Server 24.04.2 LTS
 - Prometheus 2.53.1
-- Alertmanager 0.27.0
 - Redmine 6.0.4.stable
 - Slack 4.46.101
 - Python 3.12.3
@@ -45,6 +46,7 @@ $
 ### 2. 必要な認証情報やIDを設定する
 ```
 $ cp deploy/secret.yaml.example deploy/secret.yaml
+$ 
 ```
 deploy/secret.yamlを編集し，`<redmine-api-key>`にRedmineのAPIアクセスキー、`<slack-bot-token>`にSlack AppのBot Token、`<slack-channel-id>`にチケットを通知するチャンネルのIDをそれぞれ設定してください。
 
