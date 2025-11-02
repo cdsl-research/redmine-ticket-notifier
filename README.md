@@ -17,8 +17,7 @@ K3sによるKubernetesクラスタにデプロイすることを前提として�
 ## 環境構成
 - Ubuntu Server 24.04.2 LTS
 - K3s v1.30.6+k3s1
-    - Master/Worker Node 
-      vCPU: 4 [Core], RAM: 8 [GB], SSD: 40 [GB], OS: Ubuntu Server 24.04.2 LTS
+    - Master/Worker Node:<br>vCPU: 4 cores, RAM: 8GB, SSD: 40GB, OS: Ubuntu Server 24.04.2 LTS
 - Prometheus 2.53.1
 - Redmine 6.0.4.stable
 - Slack 4.46.101
