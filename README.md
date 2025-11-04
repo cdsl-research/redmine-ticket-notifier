@@ -136,7 +136,7 @@ Redmineに作成されたチケットの例
 
 <img width="507" height="126" alt="Image" src="https://github.com/user-attachments/assets/c58cfec1-e4e5-4931-a1b8-9bd94ef3c8a7" />
 
-
+---
 
 <img width="174" height="149" alt="Image" src="https://github.com/user-attachments/assets/11d32b73-16ba-4580-8f21-d24f54193dab" />
 
