@@ -57,7 +57,7 @@ $
 
 ### 2. 環境変数を設定する
 
-`deploy/secret.yaml`を編集し、使用する環境に応じて環境変数を設定してください。
+`deploy/deployment.yaml`を編集し、使用する環境に応じて環境変数を設定してください。
 
 - `REDMINE_URL` : RedmineのURL
 - `PROJECT_ID` : 新規作成チケットの検出対象であるプロジェクトの識別子
@@ -127,6 +127,19 @@ $
 
 チケットのURLと、チケット内に記載された概要・担当者名・発行日が記載されたメッセージが通知されます。
 
-<p align="left">
-  <img src="https://github.com/user-attachments/assets/c5a75f08-9039-4974-a645-39cd47100706" alt="Image" style="width:70%;" />
-</p>
+
+Redmineに作成されたチケットの例
+
+<img width="458" height="441" alt="Image" src="https://github.com/user-attachments/assets/d0192949-0fd5-47a8-8484-2ae6cb54a311" />
+
+上記のチケットが発行されたことを通知したメッセージの表示例
+
+<img width="507" height="126" alt="Image" src="https://github.com/user-attachments/assets/c58cfec1-e4e5-4931-a1b8-9bd94ef3c8a7" />
+
+チケットのステータスが「完了」に変更されると、メッセージに「✅」のリアクションが追加される。
+
+<img width="174" height="149" alt="Image" src="https://github.com/user-attachments/assets/11d32b73-16ba-4580-8f21-d24f54193dab" />
+
+チケットのトラッカーが特定のトラッカーに変更されると、メッセージに「🗑️」のリアクションが追加される。
+
+<img width="180" height="137" alt="Image" src="https://github.com/user-attachments/assets/e8b7611a-cda8-4fd4-8581-4173697ba616" />
