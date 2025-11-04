@@ -127,16 +127,13 @@ $
 
 チケットのURLと、チケット内に記載された概要・担当者名・発行日が記載されたメッセージが通知されます。
 
+<img width="458" height="441" alt="Image" src="https://github.com/user-attachments/assets/d0192949-0fd5-47a8-8484-2ae6cb54a311" />
 
 Redmineに作成されたチケットの例
 
-<img width="458" height="441" alt="Image" src="https://github.com/user-attachments/assets/d0192949-0fd5-47a8-8484-2ae6cb54a311" />
-
-上記のチケットが発行されたことを通知したメッセージの表示例
-
 <img width="507" height="126" alt="Image" src="https://github.com/user-attachments/assets/c58cfec1-e4e5-4931-a1b8-9bd94ef3c8a7" />
 
----
+上記のチケットが発行されたことを通知したメッセージの表示例
 
 <img width="174" height="149" alt="Image" src="https://github.com/user-attachments/assets/11d32b73-16ba-4580-8f21-d24f54193dab" />
 
