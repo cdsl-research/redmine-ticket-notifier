@@ -69,6 +69,7 @@ $
 
 ```
 $ cp deploy/secret.yaml.example deploy/secret.yaml
+$
 ```
 
 `deploy/secret.yaml`を編集し、必要な認証情報やIDを設定してください。
