@@ -3,16 +3,28 @@
 ## 概要
 Redmineに登録されたチケットをSlackのチャンネルに通知します。
 
-## 前提
-K3sによるKubernetesクラスタにデプロイすることを前提としています。
+Alertmanagerから送信されたアラートをRedmineにチケットとして作成する [Redmine-Ticket-Creator](https://github.com/cdsl-research/redmine-ticket-creater) と組み合わせて使います。
 
-またSlack Appを使用します。
+※ Slack Appが作成されていることが前提です。
 
 ## 機能
-- 特定のトラッカーに新しく作成されたチケットの通知
+- 指定したプロジェクトとトラッカーの新規発行チケットの通知
 - 通知メッセージにチケットの担当者のメンションを追加（チケットの担当者名とSlackのメンバーIDの紐付けが必要）
 - チケットのステータスが完了に変更されると，該当チケットの通知メッセージに「✅」のリアクションを追加
 - 特定のトラッカーにチケットが移動された場合に，該当チケットの通知メッセージに「🗑️」のリアクションを追加
+
+## 構成
+```
+redmine-ticket-notifier/
+├── deploy
+│   ├── deployment.yaml
+│   ├── pvc.yaml
+│   └── secret.yaml.example
+├── app.py
+├── Dockerfile
+└── README.md
+```
+
 
 ## 環境構成
 - Ubuntu Server 24.04.2 LTS
@@ -42,14 +54,66 @@ $
 $ cd redmine-ticket-notifier
 $ 
 ```
-### 2. 必要な認証情報やIDを設定する
+
+### 2. 環境変数を設定する
+
+`deploy/secret.yaml`を編集し、使用する環境に応じて環境変数を設定してください。
+
+- `REDMINE_URL` : RedmineのURL
+- `PROJECT_ID` : 新規作成チケットの検出対象であるプロジェクトの識別子
+- `TRACKER_ID` : 新規作成チケットの検出対象であるトラッカーの識別子
+- `INTERVAL` : チケット確認の周期（秒）
+
+
+### 3. 必要な認証情報やIDを設定する
+
 ```
 $ cp deploy/secret.yaml.example deploy/secret.yaml
-$ 
 ```
-deploy/secret.yamlを編集し，`<redmine-api-key>`にRedmineのAPIアクセスキー、`<slack-bot-token>`にSlack AppのBot Token、`<slack-channel-id>`にチケットを通知するチャンネルのIDをそれぞれ設定してください。
 
-### 3. デプロイする
+`deploy/secret.yaml`を編集し、必要な認証情報やIDを設定してください。
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redmine-api-secret
+  namespace: redmine
+type: Opaque
+stringData:
+  # RedmineのAPIアクセスキーに置き換える
+  apiKey: "<redmine-api-key>"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: slack-app-secret
+  namespace: redmine
+type: Opaque
+stringData:
+  # SlackのBot Tokenを入力する
+  botToken: "<slack-bot-token>"
+  # 通知対象のチャンネルIDを入力する
+  channelId: "<slack-channel-id>"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: user-mapping-secret
+  namespace: redmine
+type: Opaque
+stringData:
+  # Redmine上の担当者名とSlackのメンバーIDの対応を辞書型で入力する
+  mapping: '{"Redmine上の担当者名": "SlackのメンバーID"}'
+```
+
+- `<redmine-api-key>`: RedmineのAPIアクセスキー
+- `<slack-bot-token>`: Slack AppのBot Token
+- `<slack-channel-id>`: チケットを通知するチャンネルのID
+- Redmine上の担当者名とSlackのメンバーIDの対応
+
+
+### 4. デプロイする
 ```
 $ kubectl apply -f /path/to/redmine-ticket-notifier/deploy
 deployment.apps/redmine-ticket-notifier created
@@ -59,6 +123,10 @@ secret/user-mapping-secret created
 $ 
 ```
 
-## 通知されたメッセージの表示例
+## 通知されたメッセージのSlack上での表示例
 
-<img width="387" height="128" alt="Image" src="https://github.com/user-attachments/assets/c5a75f08-9039-4974-a645-39cd47100706" />
+チケットのURLと、チケット内に記載された概要・担当者名・発行日が記載されたメッセージが通知されます。
+
+<p align="left">
+  <img src="https://github.com/user-attachments/assets/c5a75f08-9039-4974-a645-39cd47100706" alt="Image" style="width:70%;" />
+</p>
