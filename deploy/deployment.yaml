@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: redmine-ticket-notifier
-          image: c0a22100/redmine-ticket-notifier:v2.0
+          image: c0a22100/redmine-ticket-notifier:v2.1
           imagePullPolicy: Always
           env:
             - name: REDMINE_URL
@@ -44,6 +44,8 @@ spec:
             - name: NOTIFY_TRACKER_IDS
               # value: "42" # トラッカー(c0a22100-test)
               value: "28,31,33" # トラッカー(1次調査, 2次調査, 3次調査)
+            - name: NOTIFY_PROJECT_IDS
+              value: "2" # プロジェクト(オンコール), 空の場合は全プロジェクトが対象となる
             - name: LAST_CHECK_FILE
               value: "/data/last_check.txt"
             - name: NOTIFIED_TICKETS_FILE

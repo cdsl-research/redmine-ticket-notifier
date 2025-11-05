@@ -31,6 +31,17 @@ else:
         # 不正な環境変数は無視して全トラッカー通知にフォールバック
         NOTIFY_TRACKER_IDS = []
 
+# 通知するプロジェクトID（カンマ区切り、空なら全て通知）
+_notify_project_ids_raw = os.getenv("NOTIFY_PROJECT_IDS", "<notify-project-id>").strip()
+if _notify_project_ids_raw == "":
+    NOTIFY_PROJECT_IDS = []
+else:
+    try:
+        NOTIFY_PROJECT_IDS = [int(x.strip()) for x in _notify_project_ids_raw.split(",") if x.strip()]
+    except ValueError:
+        # 不正な環境変数は無視して全プロジェクト通知にフォールバック
+        NOTIFY_PROJECT_IDS = []
+
 # 未着手通知間隔（秒）（デフォルト：1時間＝3600秒）
 PENDING_NOTIFICATION_INTERVAL_SECONDS = int(os.getenv("PENDING_NOTIFICATION_INTERVAL_SECONDS", "<pending-notification-interval-seconds>"))
 # 完了したチケットを保存するファイルファイル
@@ -402,18 +413,26 @@ def truncate_description(description, max_length=250):
         return description[:max_length] + "..."
     return description
 
-def is_tracker_notification_target(issue):
+def is_notification_target(issue):
     """
-    指定されたトラッカーのチケットかどうかを判定する
+    指定されたトラッカーとプロジェクトの両方の条件を満たすチケットかどうかを判定する
     """
-    if not NOTIFY_TRACKER_IDS:  # 空の場合は全て通知
-        return True
+    # トラッカーのチェック
+    tracker_match = True
+    if NOTIFY_TRACKER_IDS:  # 空でない場合はフィルタリング
+        tracker_id = issue.get('tracker', {}).get('id')
+        if tracker_id not in NOTIFY_TRACKER_IDS:
+            tracker_match = False
     
-    tracker_id = issue.get('tracker', {}).get('id')
-    if tracker_id in NOTIFY_TRACKER_IDS:
-        return True
+    # プロジェクトのチェック
+    project_match = True
+    if NOTIFY_PROJECT_IDS:  # 空でない場合はフィルタリング
+        project_id = issue.get('project', {}).get('id')
+        if project_id not in NOTIFY_PROJECT_IDS:
+            project_match = False
     
-    return False
+    # 両方の条件を満たす場合のみ通知対象
+    return tracker_match and project_match
 
 def is_already_notified(issue):
     """
@@ -817,6 +836,10 @@ def main():
         print(f"Target trackers: {NOTIFY_TRACKER_IDS}")
     else:
         print("Target: All trackers")
+    if NOTIFY_PROJECT_IDS:
+        print(f"Target projects: {NOTIFY_PROJECT_IDS}")
+    else:
+        print("Target: All projects")
     print("Press Ctrl+C to stop")
     print("-" * 60)
     
@@ -839,11 +862,11 @@ def main():
         new_issues = get_new_issues(last_check_time)
         
         if new_issues:
-            # トラッカーフィルタリングを適用
-            tracker_filtered_issues = [issue for issue in new_issues if is_tracker_notification_target(issue)]
+            # トラッカーとプロジェクトのフィルタリングを適用
+            filtered_issues = [issue for issue in new_issues if is_notification_target(issue)]
             
             # 通知済みチェックを適用
-            final_filtered_issues = [issue for issue in tracker_filtered_issues if not is_already_notified(issue)]
+            final_filtered_issues = [issue for issue in filtered_issues if not is_already_notified(issue)]
             
             if final_filtered_issues:
                 print(f"Found {len(final_filtered_issues)} new tickets to notify")

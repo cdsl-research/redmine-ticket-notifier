@@ -18,6 +18,7 @@ ENV LAST_CHECK_FILE=/app/data/last_check.txt \
     POLLING_INTERVAL=10 \
     PENDING_NOTIFICATION_INTERVAL_SECONDS=3600 \
     NOTIFY_TRACKER_IDS="28,31,33" \
+    NOTIFY_PROJECT_IDS="" \
     USER_MAPPING_JSON='<"Redmine上の担当者名": "SlackのメンバーID">'
 CMD ["python", "/app/app.py"]
 
